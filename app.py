@@ -4,14 +4,12 @@ import json
 import urllib.parse
 import base64
 import time
-import hashlib
-import requests
 import re
+import requests
 
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 from datetime import datetime
-
 
 # ═══════════════════════════════════════════════════════════
 # ثوابت OB55
@@ -35,7 +33,7 @@ LOGIN_URL = "https://loginbp.ppmainecoonghj.com/MajorLogin"
 
 
 # ═══════════════════════════════════════════════════════════
-# Protobuf Writer (بسيط)
+# ProtoWriter مبسط
 # ═══════════════════════════════════════════════════════════
 class ProtoWriter:
     def varint(self, value):
@@ -109,6 +107,9 @@ def build_major_login(open_id, access_token, platform="3"):
     return ProtoWriter().create_message(fields)
 
 
+# ═══════════════════════════════════════════════════════════
+# Core functions
+# ═══════════════════════════════════════════════════════════
 def get_open_id(access_token):
     """استخراج open_id من Access Token"""
     try:
@@ -129,7 +130,7 @@ def get_open_id(access_token):
 
 
 def decode_jwt(jwt_token):
-    """فك JWT بدون تحقق من التوقيع"""
+    """فك JWT بدون تحقق"""
     try:
         parts = jwt_token.split('.')
         payload_b64 = parts[1] + '=' * (-len(parts[1]) % 4)
@@ -141,16 +142,16 @@ def decode_jwt(jwt_token):
 
 def do_major_login(access_token):
     """ينفذ MajorLogin ويعيد JWT + البيانات"""
-    # 1) احصل على open_id
+    # 1) open_id
     open_id, platform = get_open_id(access_token)
     if not open_id:
         return {"success": False, "error": f"invalid_token: {platform}"}
 
-    # 2) ابن payload
+    # 2) payload
     payload = build_major_login(open_id, access_token, platform)
     encrypted = aes_encrypt(payload)
 
-    # 3) أرسل الطلب
+    # 3) طلب MajorLogin (هنا الإصلاح!)
     try:
         resp = requests.post(
             LOGIN_URL,
@@ -162,23 +163,24 @@ def do_major_login(access_token):
     except Exception as e:
         return {"success": False, "error": f"connection_failed: {e}"}
 
-    if resp.status != 200:
+    # ✅ الإصلاح: requests يستخدم .status_code
+    if resp.status_code != 200:
         return {
             "success": False,
-            "error": f"major_login_failed: HTTP {resp.status}",
+            "error": f"major_login_failed: HTTP {resp.status_code}",
             "body": resp.text[:200],
         }
 
-    # 4) استخرج JWT من الرد
+    # 4) استخراج JWT
     text = resp.content.decode('utf-8', errors='ignore')
     jwt_match = re.search(r'(eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)', text)
     if not jwt_match:
-        return {"success": False, "error": "jwt_not_found"}
+        return {"success": False, "error": "jwt_not_found", "raw": text[:200]}
 
     jwt_token = jwt_match.group(1)
     jwt_payload = decode_jwt(jwt_token)
 
-    # 5) ابن الرد النهائي
+    # 5) الرد النهائي
     return {
         "success": True,
         "access_token_used": access_token[:20] + "...",
@@ -191,7 +193,10 @@ def do_major_login(access_token):
         "nickname_encoded": jwt_payload.get("nickname"),
         "signature_md5": jwt_payload.get("signature_md5"),
         "client_version": jwt_payload.get("client_version"),
+        "client_version_code": jwt_payload.get("client_version_code"),
         "release_version": jwt_payload.get("release_version"),
+        "is_emulator": jwt_payload.get("is_emulator"),
+        "country_code": jwt_payload.get("country_code"),
         "exp": jwt_payload.get("exp"),
         "jwt_decoded": {
             "header": {"alg": "HS256", "svr": "1", "typ": "JWT"},
@@ -203,18 +208,16 @@ def do_major_login(access_token):
 
 
 # ═══════════════════════════════════════════════════════════
-# HTTP Handler (Vercel Serverless)
+# HTTP Handler
 # ═══════════════════════════════════════════════════════════
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        # رخّص CORS
         self.send_response(200)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
 
         try:
-            # استخرج access_token من query
             parsed = urllib.parse.urlparse(self.path)
             params = urllib.parse.parse_qs(parsed.query)
             access_token = params.get('access_token', [None])[0]
@@ -231,5 +234,10 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(result, ensure_ascii=False, indent=2).encode('utf-8'))
 
         except Exception as e:
-            err = {"success": False, "error": f"server_error: {str(e)}"}
+            import traceback
+            err = {
+                "success": False,
+                "error": f"server_error: {str(e)}",
+                "trace": traceback.format_exc().split('\n')[-3:],
+            }
             self.wfile.write(json.dumps(err, ensure_ascii=False, indent=2).encode('utf-8'))
